@@ -1,129 +1,128 @@
-// Import necessary modules from the AWS CDK library
-import { CfnOutput, Stack, StackProps } from "aws-cdk-lib";
-// Import the Construct class from the 'constructs' module
+import { Arn, CfnOutput, Fn, Stack, StackProps } from "aws-cdk-lib";
 import { Construct } from "constructs";
-// Import path module for file path operations
-import * as path from "path";
-// Import Route 53 module for working with DNS records
+import * as elb from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as route53 from 'aws-cdk-lib/aws-route53';
-// Import the StaticSite construct for creating static sites
-import { StaticSite } from "./constructs/static-site";
-// Import CloudFront Distribution module
-import { Distribution } from "aws-cdk-lib/aws-cloudfront";
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
+import * as targets from 'aws-cdk-lib/aws-route53-targets';
 
-// Define the properties interface for the StaticSitesStack
-export interface StaticSitesStackProps extends StackProps {
-    readonly apiUrl: string; // URL of the API endpoint
-    readonly saasAdminEmail: string; // Admin email for SAAS application
+export interface ApiStackProps extends StackProps {
+    readonly internalNLBDomain: string
+    readonly vpc: ec2.Vpc
+    readonly ingressControllerName: string
+    readonly eksClusterName: string
 
-    readonly usingKubeCost: boolean; // Indicates if KubeCost is being used
+    readonly customDomain?: string
+    readonly hostedZoneId?: string
+};
 
-    readonly customBaseDomain?: string; // Optional custom base domain for the static sites
-    readonly hostedZoneId?: string; // Optional hosted zone ID for Route 53
-}
+export class ApiStack extends Stack {
 
-// Define the StaticSitesStack class, extending Stack
-export class StaticSitesStack extends Stack {
+    readonly apiUrl: string
 
-    readonly applicationSiteDistribution: Distribution; // CloudFront distribution for the application site
-
-    constructor(scope: Construct, id: string, props: StaticSitesStackProps) {
-        // Call the constructor of the base class (Stack)
+    constructor(scope: Construct, id: string, props: ApiStackProps) {
         super(scope, id, props);
 
-        // Check if a custom domain is being used
-        const useCustomDomain = props.customBaseDomain ? true : false;
-        // Validate if a hosted zone ID is provided when using a custom domain
-        if (useCustomDomain && !props.hostedZoneId) {
-            throw new Error("HostedZoneId must be specified when using a custom domain for static sites.");
+        const useCustomDomain = props.customDomain ? true : false;
+
+        const publicHostedZone = useCustomDomain ?
+            route53.PublicHostedZone.fromHostedZoneAttributes(this, 'CustomDomainPublicHostedZone', {
+                hostedZoneId: props.hostedZoneId!,
+                zoneName: `api.${props.customDomain!}`
+            }) :
+            undefined;
+
+        const apiCertificate = useCustomDomain ?
+            new acm.DnsValidatedCertificate(this, 'ApiCertificate', {
+                domainName: `api.${props.customDomain!}`,
+                hostedZone: publicHostedZone!,
+                region: 'us-east-1',
+            }) :
+            undefined;
+
+        const nlbSubdomain = Fn.select(0, Fn.split(".", props.internalNLBDomain));
+        const nlbSubdomainParts = Fn.split("-", nlbSubdomain);
+        const nlbName = Fn.select(0, nlbSubdomainParts);
+        const nlbId = Fn.select(1, nlbSubdomainParts);
+        const nlbArn = Arn.format({
+            service: "elasticloadbalancing",
+            resource: "loadbalancer",
+            resourceName: `net/${nlbName}/${nlbId}`,
+        }, this);
+
+
+        const nlb = elb.NetworkLoadBalancer.fromNetworkLoadBalancerAttributes(this, "SaaSInternalNLB", {
+            loadBalancerArn: nlbArn,
+            loadBalancerDnsName: props.internalNLBDomain,
+            vpc: props.vpc,
+        });
+
+        const vpcLink = new apigw.VpcLink(this, "eks-saas-vpc-link", {
+            description: "VPCLink to connect the API Gateway with the private NLB sitting in front of the EKS cluster",
+            targets: [nlb],
+            vpcLinkName: "eks-saas-vpc-link",
+        });
+
+        const domainNameProps = useCustomDomain ?
+            { domainName: `api.${props.customDomain!}`, certificate: apiCertificate } as apigw.DomainNameProps :
+            undefined;
+
+        const api = new apigw.RestApi(this, "EKSSaaSAPI", {
+            restApiName: "EKSSaaSAPI",
+            endpointTypes: [apigw.EndpointType.REGIONAL],
+            domainName: domainNameProps,
+            deployOptions: {
+                tracingEnabled: true,
+            },
+            defaultMethodOptions: {
+                authorizationType: apigw.AuthorizationType.NONE,
+            },
+            
+        });
+        const proxy = api.root.addProxy({
+            anyMethod: false,
+        });
+
+        proxy.addMethod(
+            "ANY",
+            new apigw.Integration({
+                type: apigw.IntegrationType.HTTP_PROXY,
+                options: {
+                    connectionType: apigw.ConnectionType.VPC_LINK,
+                    vpcLink: vpcLink,
+                    requestParameters: {
+                        "integration.request.path.proxy": "method.request.path.proxy"
+                    },
+                },
+                integrationHttpMethod: "ANY",
+                uri: `http://${nlb.loadBalancerDnsName}/{proxy}`,
+            }),
+            {
+                requestParameters: {
+                    "method.request.path.proxy": true
+                },
+                authorizationType: apigw.AuthorizationType.NONE,
+            }
+        );
+        proxy.addCorsPreflight({
+            allowOrigins: apigw.Cors.ALL_ORIGINS,
+            allowMethods: apigw.Cors.ALL_METHODS,
+        });
+
+        if (useCustomDomain) {
+            
+            new route53.ARecord(this, 'CustomDomainAliasRecord', {
+                zone: publicHostedZone!,
+                target: route53.RecordTarget.fromAlias(new targets.ApiGateway(api)),
+                recordName: `api.${props.customDomain!}`
+            });
         }
 
-        // Get the hosted zone based on whether a custom domain is being used
-        const hostedZone = useCustomDomain ? route53.PublicHostedZone.fromHostedZoneAttributes(this, 'PublicHostedZone', {
-            hostedZoneId: props.hostedZoneId!,
-            zoneName: props.customBaseDomain!
-        }) : undefined;
+        this.apiUrl = useCustomDomain ? `https://api.${props.customDomain!}` : api.url;
 
-
-        // Create landing site
-        const landingSite = new StaticSite(this, "LandingSite", {
-            name: "LandingSite",
-            assetDirectory: path.join(path.dirname(__filename), "..", "clients", "Landing"),
-            allowedMethods: ["GET", "HEAD", "OPTIONS"],
-            createCognitoUserPool: false,
-            siteConfigurationGenerator: (siteDomain, _) => ({
-                production: true,
-                apiUrl: props.apiUrl,
-                domain: siteDomain,
-                usingCustomDomain: useCustomDomain,
-            }),
-            customDomain: useCustomDomain ? `landing.${props.customBaseDomain!}` : undefined,
-            hostedZone: hostedZone
-        });
-
-        // Output the repository URL and URL of the landing site
-        new CfnOutput(this, `LandingSiteRepository`, {
-            value: landingSite.repositoryUrl
-        });
-        new CfnOutput(this, `LandingSiteUrl`, {
-            value: `https://${landingSite.siteDomain}`
-        });
-
-
-        // Create admin site
-        const adminSite = new StaticSite(this, "AdminSite", {
-            name: "AdminSite",
-            assetDirectory: path.join(path.dirname(__filename), "..", "clients", "Admin"),
-            allowedMethods: ["GET", "HEAD", "OPTIONS"],
-            createCognitoUserPool: true,
-            cognitoProps: {
-                adminUserEmail: props.saasAdminEmail
-            },
-            siteConfigurationGenerator: (siteDomain, cognito) => ({
-                production: true,
-                clientId: cognito!.appClientId,
-                issuer: cognito!.authServerUrl,
-                customDomain: cognito!.appClientId,
-                apiUrl: props.apiUrl,
-                domain: siteDomain,
-                usingCustomDomain: useCustomDomain,
-                usingKubeCost: props.usingKubeCost,
-                kubecostUI: props.usingKubeCost ? `${props.apiUrl}/kubecost` : ""
-            }),
-            customDomain: useCustomDomain ? `admin.${props.customBaseDomain!}` : undefined,
-            hostedZone: hostedZone
-        });
-        // Output the repository URL and URL of the admin site
-        new CfnOutput(this, `AdminSiteRepository`, {
-            value: adminSite.repositoryUrl
-        });
-        new CfnOutput(this, `AdminSiteUrl`, {
-            value: `https://${adminSite.siteDomain}`
-        });
-
-
-        // Create application site
-        const applicationSite = new StaticSite(this, "ApplicationSite", {
-            name: "ApplicationSite",
-            assetDirectory: path.join(path.dirname(__filename), "..", "clients", "Application"),
-            allowedMethods: ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"],
-            createCognitoUserPool: false,
-            siteConfigurationGenerator: (siteDomain, _) => ({
-                production: true,
-                apiUrl: props.apiUrl,
-                domain: siteDomain,
-                usingCustomDomain: useCustomDomain,
-            }),
-            customDomain: useCustomDomain ? `app.${props.customBaseDomain!}` : undefined,
-            certDomain: useCustomDomain ? `*.app.${props.customBaseDomain!}` : undefined,
-            hostedZone: hostedZone
-        });
-
-        // Set the CloudFront distribution for the application site
-        this.applicationSiteDistribution = applicationSite.cloudfrontDistribution;
-        // Output the repository URL of the application site
-        new CfnOutput(this, `ApplicationSiteRepository`, {
-            value: applicationSite.repositoryUrl
+        new CfnOutput(this, "APIUrl", {
+            value: this.apiUrl
         });
     }
 }

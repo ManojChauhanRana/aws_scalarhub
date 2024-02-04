@@ -4,41 +4,36 @@ import * as codecommit from 'aws-cdk-lib/aws-codecommit';
 import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as iam from 'aws-cdk-lib/aws-iam';
 
-// Define the properties required for tenant onboarding
 export interface TenantOnboardingProps {
-    readonly onboardingProjectName: string; // Name of the onboarding project
-    readonly deletionProjectName: string; // Name of the deletion project
-    readonly assetDirectory: string; // Directory containing project assets
+    readonly onboardingProjectName: string
+    readonly deletionProjectName: string
+    readonly assetDirectory: string
 
-    readonly eksClusterName: string; // Name of the EKS cluster
-    readonly codebuildKubectlRole: iam.IRole; // IAM role for CodeBuild to interact with Kubectl
-    readonly eksClusterOIDCProviderArn: string; // ARN of the OIDC provider associated with EKS
+    readonly eksClusterName: string
+    readonly codebuildKubectlRole: iam.IRole
+    readonly eksClusterOIDCProviderArn: string
 
-    readonly applicationServiceBuildProjectNames: string[]; // Names of application service build projects
+    readonly applicationServiceBuildProjectNames: string[]
 
-    readonly appSiteDistributionId: string; // ID of the CloudFront distribution for the app site
-    readonly appSiteCloudFrontDomain: string; // Domain of the CloudFront distribution for the app site
-    readonly appSiteCustomDomain?: string; // Custom domain for the app site (optional)
-    readonly appSiteHostedZoneId?: string; // Hosted zone ID for the custom domain (optional)
+    readonly appSiteDistributionId: string
+    readonly appSiteCloudFrontDomain: string
+    readonly appSiteCustomDomain?: string
+    readonly appSiteHostedZoneId?: string
 
-    readonly defaultBranchName?: string; // Default branch name for the repository (optional)
+    readonly defaultBranchName?: string
 }
 
-// Define the main construct for tenant onboarding
 export class TenantOnboarding extends Construct {
 
-    readonly repositoryUrl: string; // URL of the source code repository
+    readonly repositoryUrl: string;
 
     constructor(scope: Construct, id: string, props: TenantOnboardingProps) {
         super(scope, id);
 
-        // Set default branch name if not provided
         const defaultBranchName = props.defaultBranchName ?? "main";
 
-        // Add permissions required for tenant onboarding
         this.addTenantOnboardingPermissions(props.codebuildKubectlRole, props);
 
-        // Create a CodeCommit repository for tenant onboarding
         const sourceRepo = new codecommit.Repository(this, `${id}Repository`, {
             repositoryName: "TenantOnboarding",
             description: `Repository for tenant onboarding`,
@@ -47,118 +42,127 @@ export class TenantOnboarding extends Construct {
         sourceRepo.applyRemovalPolicy(RemovalPolicy.DESTROY);
         this.repositoryUrl = sourceRepo.repositoryCloneUrlHttp;
 
-        // Define CloudFormation parameters for onboarding
         const onboardingCfnParams: { [key: string]: string } = {
-            "TenantId": "$TENANT_ID", // Placeholder for Tenant ID
-            "CompanyName": '"$COMPANY_NAME"', // Placeholder for Company Name
-            "TenantAdminEmail": '"$ADMIN_EMAIL"', // Placeholder for Admin Email
-            "AppDistributionId": `"${props.appSiteDistributionId}"`, // CloudFront distribution ID
-            "DistributionDomain": `"${props.appSiteCloudFrontDomain}"`, // CloudFront distribution domain
-            "EKSClusterName": `"${props.eksClusterName}"`, // EKS cluster name
-            "KubectlRoleArn": `"${props.codebuildKubectlRole.roleArn}"`, // ARN of Kubectl IAM role
-            "OIDCProviderArn": `"${props.eksClusterOIDCProviderArn}"`, // ARN of EKS OIDC provider
+            "TenantId": "$TENANT_ID",
+            "CompanyName": '"$COMPANY_NAME"',
+            "TenantAdminEmail": '"$ADMIN_EMAIL"',
+            "AppDistributionId": `"${props.appSiteDistributionId}"`,
+            "DistributionDomain": `"${props.appSiteCloudFrontDomain}"`,
+            "EKSClusterName": `"${props.eksClusterName}"`,
+            "KubectlRoleArn": `"${props.codebuildKubectlRole.roleArn}"`,
+            "OIDCProviderArn": `"${props.eksClusterOIDCProviderArn}"`,
         };
-    
 
-        // Construct a string containing CloudFormation parameters from the provided object
-const cfnParamString = Object.entries(onboardingCfnParams).map(x => `--parameters ${x[0]}=${x[1]}`).join(" ");
+        const cfnParamString = Object.entries(onboardingCfnParams).map(x => `--parameters ${x[0]}=${x[1]}`).join(" ");
 
-// Create a CodeBuild project for tenant onboarding
-const onboardingProject = new codebuild.Project(this, `TenantOnboardingProject`, {
-    projectName: `${props.onboardingProjectName}`, // Name of the CodeBuild project
-    source: codebuild.Source.codeCommit({ repository: sourceRepo }), // Use CodeCommit as the source
-    role: props.codebuildKubectlRole, // IAM role for the CodeBuild project
-    environment: {
-        buildImage: codebuild.LinuxBuildImage.STANDARD_5_0, // Build environment
-    },
-    environmentVariables: {
-        // Environment variables for the CodeBuild project
-        TENANT_ID: { value: "" }, // Placeholder for Tenant ID
-        COMPANY_NAME: { value: "" }, // Placeholder for Company Name
-        ADMIN_EMAIL: { value: "" }, // Placeholder for Admin Email
-        PLAN: { value: "" }, // Placeholder for Plan
-        AWS_ACCOUNT: { value: Stack.of(this).account }, // AWS account ID
-        AWS_REGION: { value: Stack.of(this).region }, // AWS region
-        APP_SITE_CUSTOM_DOMAIN: { value: props.appSiteCustomDomain ?? "" }, // Custom domain for the app site
-        APP_SITE_HOSTED_ZONE: { value: props.appSiteHostedZoneId ?? "" }, // Hosted zone ID for the custom domain
-    },
-    buildSpec: codebuild.BuildSpec.fromObject({
-        // Build specification for the CodeBuild project
-        version: '0.2',
-        phases: {
-            install: {
-                commands: [
-                    "npm i", // Install dependencies
-                ]
+        const onboardingProject = new codebuild.Project(this, `TenantOnboardingProject`, {
+            projectName: `${props.onboardingProjectName}`,
+            source: codebuild.Source.codeCommit({ repository: sourceRepo }),
+            role: props.codebuildKubectlRole,
+            environment: {
+                buildImage: codebuild.LinuxBuildImage.STANDARD_5_0,
             },
-            pre_build: {
-                commands: [
-                    // Pre-build commands (if any)
-                ],
+            environmentVariables: {
+                TENANT_ID: {
+                    value: ""
+                },
+                COMPANY_NAME: {
+                    value: ""
+                },
+                ADMIN_EMAIL: {
+                    value: ""
+                },
+                PLAN: {
+                    value: ""
+                },
+                AWS_ACCOUNT: {
+                    value: Stack.of(this).account
+                },
+                AWS_REGION: {
+                    value: Stack.of(this).region
+                },
+                APP_SITE_CUSTOM_DOMAIN: {
+                    value: props.appSiteCustomDomain ?? ""
+                },
+                APP_SITE_HOSTED_ZONE: {
+                    value: props.appSiteHostedZoneId ?? ""
+                },
             },
-            build: {
-                commands: [
-                    "npm run cdk bootstrap", // Bootstrap AWS CDK
-                    `npm run cdk deploy TenantStack-$TENANT_ID -- --require-approval=never ${cfnParamString}` // Deploy AWS CDK stack with CloudFormation parameters
-                ],
-            },
-            post_build: {
-                commands: props.applicationServiceBuildProjectNames.map(
-                    // Commands to trigger builds for application service projects
-                    x => `aws codebuild start-build --project-name ${x}TenantDeploy --environment-variables-override name=TENANT_ID,value=\"$TENANT_ID\",type=PLAINTEXT`)
-            },
-        },
-    }),
-});
+            buildSpec: codebuild.BuildSpec.fromObject({
+                version: '0.2',
+                phases: {
+                    install: {
+                        commands: [
+                            "npm i",
+                        ]
+                    },
+                    pre_build: {
+                        commands: [
+                        ],
+                    },
+                    build: {
+                        commands: [
+                            "npm run cdk bootstrap",
+                            `npm run cdk deploy TenantStack-$TENANT_ID -- --require-approval=never ${cfnParamString}`
+                        ],
+                    },
+                    post_build: {
+                        commands: props.applicationServiceBuildProjectNames.map(
+                            x => `aws codebuild start-build --project-name ${x}TenantDeploy --environment-variables-override name=TENANT_ID,value=\"$TENANT_ID\",type=PLAINTEXT`)
+                    },
+                },
+            }),
+        });
+        sourceRepo.grantPull(onboardingProject.role!);
 
-      // Grant permission for the CodeBuild project to pull from the CodeCommit repository
-sourceRepo.grantPull(onboardingProject.role!);
 
-// Create a CodeBuild project for tenant deletion
-const tenantDeletionProject = new codebuild.Project(this, 'TenantDeletionProject', {
-    projectName: props.deletionProjectName, // Name of the CodeBuild project
-    role: props.codebuildKubectlRole, // IAM role for the CodeBuild project
-    source: codebuild.Source.codeCommit({ repository: sourceRepo }), // Use CodeCommit as the source
-    environment: {
-        buildImage: codebuild.LinuxBuildImage.STANDARD_5_0, // Build environment
-    },
-    environmentVariables: {
-        TENANT_ID: { value: "" }, // Placeholder for Tenant ID
-        AWS_ACCOUNT: { value: Stack.of(this).account }, // AWS account ID
-        AWS_REGION: { value: Stack.of(this).region } // AWS region
-    },
-    buildSpec: codebuild.BuildSpec.fromObject({
-        // Build specification for the CodeBuild project
-        version: '0.2',
-        phases: {
-            install: {
-                commands: [
-                    "npm i", // Install dependencies
-                ]
+        const tenantDeletionProject = new codebuild.Project(this, 'TenantDeletionProject', {
+            projectName: props.deletionProjectName,
+            role: props.codebuildKubectlRole,
+            source: codebuild.Source.codeCommit({ repository: sourceRepo }),
+            environment: {
+                buildImage: codebuild.LinuxBuildImage.STANDARD_5_0,
             },
-            pre_build: {
-                commands: [
-                    // Pre-build commands (if any)
-                ],
+            environmentVariables: {
+                TENANT_ID: {
+                    value: ""
+                },
+                AWS_ACCOUNT: {
+                    value: Stack.of(this).account
+                },
+                AWS_REGION: {
+                    value: Stack.of(this).region
+                }
             },
-            build: {
-                commands: [
-                    "npm run cdk bootstrap", // Bootstrap AWS CDK
-                    `npm run cdk destroy TenantStack-$TENANT_ID -- --require-approval=never -f`, // Destroy AWS CDK stack with force flag
-                ],
-            },
-            post_build: {
-                commands: [
-                    // Post-build commands (if any)
-                ]
-            },
-        },
-    }),
-});
+            buildSpec: codebuild.BuildSpec.fromObject({
+                version: '0.2',
+                phases: {
+                    install: {
+                        commands: [
+                            "npm i",
+                        ]
+                    },
+                    pre_build: {
+                        commands: [
+                        ],
+                    },
+                    build: {
+                        commands: [
+                            "npm run cdk bootstrap",
+                            `npm run cdk destroy TenantStack-$TENANT_ID -- --require-approval=never -f`,
+                        ],
+                    },
+                    post_build: {
+                        commands: [
+                        ]
+                    },
+                },
+            }),
+        });
+        sourceRepo.grantPull(tenantDeletionProject.role!);
+    }
 
-// Grant permission for the CodeBuild project to pull from the CodeCommit repository
-sourceRepo.grantPull(tenantDeletionProject.role!);
-}
+
     private addTenantOnboardingPermissions(projectRole: iam.IRole, props: TenantOnboardingProps) {
         // TODO: reduce the permission 
 
